@@ -293,20 +293,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Загрузка модели тональности
+
+# Загрузка модели тональности (ОПТИМИЗИРОВАНО ДЛЯ RENDER)
 logger.info("Loading sentiment analysis model...")
 try:
     sentiment_pipeline = pipeline(
         "sentiment-analysis",
-        model="blanchefort/rubert-base-cased-sentiment",
-        device=-1
+        model="s-nlp/rubert-base-cased-sentiment-rusentiment",
+        device=-1,
+        truncation=True  # Важно: автоматически обрезает длинные тексты
     )
-    logger.info("Model loaded successfully!")
+    logger.info("Lightweight sentiment model loaded successfully!")
 except Exception as e:
     logger.error(f"Error loading model: {e}")
     sentiment_pipeline = None
-
-
 # ==========================================
 # 5. ФУНКЦИИ РАБОТЫ С БД
 # ==========================================
