@@ -212,6 +212,26 @@ def add_to_history_db(user_id, text, sentiment, score, emoji, triggers, advice):
         db.close()
 
 
+def get_history_db(user_id: str, limit: int = 20):
+    if not SessionLocal: return []
+    db = SessionLocal()
+    try:
+        items = db.query(AnalysisHistory).filter(
+            AnalysisHistory.user_id == user_id
+        ).order_by(AnalysisHistory.timestamp.desc()).limit(limit).all()
+        return [
+            {
+                "id": item.id, "text": item.text, "sentiment": item.sentiment,
+                "score": item.score, "emoji": item.emoji,
+                "triggers": json.loads(item.triggers) if item.triggers else [],
+                "advice": item.advice, "timestamp": item.timestamp.isoformat()
+            }
+            for item in items
+        ]
+    finally:
+        db.close()
+
+
 @app.post("/analyze")
 async def analyze_text(request: TextRequest):
     if not request.text or not request.text.strip(): raise HTTPException(400, "Text cannot be empty")
@@ -225,13 +245,9 @@ async def analyze_text(request: TextRequest):
 
         # 2. УЛУЧШЕННАЯ ПОСТ-ОБРАБОТКА (Гибридная логика)
         text_lower = request.text.lower()
-
-        # Маркеры негатива/тревоги, которые модель может пропустить в коротких фразах
         negative_markers = ['боюсь', 'страх', 'тревога', 'паника', 'ужас', 'кошмар',
                             'не хочу жить', 'смерть', 'больно', 'плохо', 'тяжело',
                             'нервы', 'стресс', 'депрессия', 'одиноко', 'устал', 'бесит']
-
-        # Маркеры позитива
         positive_markers = ['радость', 'счастье', 'люблю', 'класс', 'супер', 'отлично',
                             'горжусь', 'успех', 'победа', 'весело', 'смешно', 'благодарен']
 
@@ -251,20 +267,76 @@ async def analyze_text(request: TextRequest):
         advice = advisor.generate_advice(sentiment, triggers)
 
         add_to_history_db(request.user_id, request.text, sentiment, score, final_emoji, triggers, advice)
+        history = get_history_db(request.user_id, limit=10)
 
         return {
             "result": {
-                "sentiment": sentiment,
-                "score": round(score, 4),
-                "emoji": final_emoji,
-                "confidence": round(score * 100, 1),
-                "triggers": triggers,
+                "sentiment": sentiment, "score": round(score, 4), "emoji": final_emoji,
+                "confidence": round(score * 100, 1), "triggers": triggers,
                 "personalized_advice": advice
-            }
+            },
+            "history": history,
+            "total_analyzed": len(history)
         }
     except Exception as e:
         logger.error(f"Analyze error: {e}");
         raise HTTPException(500, str(e))
+
+
+@app.get("/history/{user_id}")
+async def get_history(user_id: str, limit: int = 20):
+    history = get_history_db(user_id, limit)
+    return {"user_id": user_id, "total": len(history), "history": history}
+
+
+@app.delete("/history/{user_id}")
+async def clear_history(user_id: str):
+    if not SessionLocal: raise HTTPException(503, "DB unavailable")
+    db = SessionLocal()
+    try:
+        db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id).delete()
+        db.commit()
+        return {"message": f"History cleared for user {user_id}"}
+    except Exception as e:
+        db.rollback();
+        raise HTTPException(500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/stats/{user_id}")
+async def get_user_stats(user_id: str):
+    """Статистика эмоций пользователя"""
+    if not SessionLocal: raise HTTPException(503, "Database connection failed")
+    db = SessionLocal()
+    try:
+        total_count = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id).count()
+        if total_count == 0:
+            return {"user_id": user_id, "message": "No data", "total_analyses": 0}
+
+        pos = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id,
+                                               AnalysisHistory.sentiment == 'positive').count()
+        neg = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id,
+                                               AnalysisHistory.sentiment == 'negative').count()
+        neu = db.query(AnalysisHistory).filter(AnalysisHistory.user_id == user_id,
+                                               AnalysisHistory.sentiment == 'neutral').count()
+        avg_conf = db.query(func.avg(AnalysisHistory.score)).filter(AnalysisHistory.user_id == user_id).scalar()
+
+        return {
+            "user_id": user_id, "total_analyses": total_count,
+            "emotions": {
+                "positive": {"count": pos, "percentage": round((pos / total_count) * 100, 1)},
+                "negative": {"count": neg, "percentage": round((neg / total_count) * 100, 1)},
+                "neutral": {"count": neu, "percentage": round((neu / total_count) * 100, 1)}
+            },
+            "average_confidence": round(float(avg_conf), 4) if avg_conf else 0,
+            "dominant_emotion": max({"positive": pos, "negative": neg, "neutral": neu}, key=lambda x: x[1])
+        }
+    except Exception as e:
+        logger.error(f"Error fetching stats: {e}");
+        raise HTTPException(500, detail=str(e))
+    finally:
+        db.close()
 
 
 @app.get("/admin/reload-advice")
